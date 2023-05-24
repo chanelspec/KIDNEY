@@ -1,0 +1,824 @@
+---
+title: "Question 1: Which type of sample, Biopsy or Peripheral Blood, is a better predictor of kidney transplant success in the early stage?"
+date: "`r format(Sys.time(), '%d %B, %Y %H:%M')`"
+author: "KIDNEY P7- CHANEL (R-markdown & Shiny Q1), Aagrath and Manfred"
+output: 
+  html_document: 
+    self_contained: true # Creates a single HTML file as output
+    code_folding: hide # Code folding; allows you to show/hide code chunks
+    code_download: true # Includes a menu to download the code file
+    toc: true # (Optional) Creates a table of contents!
+    toc_float: true # table of contents at the side
+    number_sections: true # (Optional) Puts numbers next to heading/subheadings
+table-of-contents: true # (Optional) Creates a table of contents!
+number-sections: true # (Optional) Puts numbers next to heading/subheadings
+
+---
+
+
+
+
+
+
+# Data Collection
+***
+
+For question 1, the data is collected using a dataset from the allograft rejection spreadsheet, which contains all geo databases with accession IDs.  This dataset was obtained from the Gene Expression Omnibus database and assigned to a Sydney student via the kidney project page on Canvas. Most geodatabases contain information about accession IDs such as feature data and phenodata.
+
+In this question, two microarray datasets have been chosen, with accession numbers GSE15296 and GSE34437. GEO15296 denotes the type of peripheral blood sample, whereas GSE34437 denotes the type of biopsy sample. GEO15296 contains the gene expression of 75 blood samples, 51 of which developed graft rejection and 24 of which had a stable graft as the outcome. GSE34437, on the other hand, contains 66 biopsy samples from 13 patients who developed graft rejection and 53 patients who had stable graft outcomes. 
+
+According to these results, the rejection and stable outcomes are not equal in both datasets, and more analysis is required to ensure the data's consistency. We aiming to investigate which of these two samples is a better predictor of kidney transplant success in the early stages.
+
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+
+
+library(DT)
+library(ggplot2)
+library(viridis)
+library(cvTools)
+library(dplyr)
+library(maps)
+library(ggrepel)
+library(tidyverse)
+library(patchwork)
+library(devtools)
+library(tsfeatures)
+library(ggpubr)
+library(janitor)
+library(reshape2)
+library(pROC)
+library(plotROC)
+library(leaflet)
+library(GEOquery)
+library(patchwork)
+library(Biobase)
+library(limma)
+library(class)
+library(tuneR)
+library(e1071)
+library(randomForest)
+library(preprocessCore)
+library(raster)
+library(data.table)
+library(MASS)
+library(gridExtra)
+library(caret)
+library(RColorBrewer)
+
+rejection <- read.csv("C:/Users/Lenovo Ideapad/Downloads/Allograft Rejection Spreadsheet.xlsx")
+
+#Blood
+gset <- getGEO("GSE15296", GSEMatrix = TRUE, AnnotGPL=TRUE)[[1]]
+eMat = exprs(gset)
+gset$Outcome <- ifelse(grepl("AR", gset$title), "Rejection", "Stable") 
+
+
+
+#biopsy
+gset2 <- getGEO("GSE34437", GSEMatrix = TRUE, AnnotGPL=TRUE)[[1]]
+eMat2 = exprs(gset2)
+gset2$Outcome <- ifelse(grepl("AR", gset2$title), "Rejection", "Stable") #Tidy the title variable and call it Outcome. 
+
+
+
+```
+
+```{r}
+show(gset)
+table(gset$Outcome)
+show(gset2)
+table(gset2$Outcome)
+```
+
+
+# Data Cleaning
+
+
+
+```{r}
+
+
+# GSE15296 preprocessing (blood)
+featureDatablood <- fData(gset)
+designblood <- model.matrix(~Outcome, data = pData(gset))
+fitblood <- lmFit(exprs(gset), designblood)
+fitblood <- eBayes(fitblood)
+
+fit4blood <- topTable(fitblood, genelist = featureDatablood[, "Gene symbol"], n = Inf) |> 
+  rownames_to_column("row") |> 
+  filter(!is.na(ID)) |> 
+  filter(ID != "") |> 
+  group_by(ID) |> 
+  filter(P.Value == min(P.Value)) |> 
+  pull(row)
+
+gset4blood <- gset[fit4blood]
+
+# GSE34437 preprocessing (biopsy)
+featureDatabiopsy <- fData(gset2)
+designbiopsy <- model.matrix(~Outcome, data = pData(gset2))
+fitbiopsy <- lmFit(exprs(gset2), designbiopsy)
+fitbiopsy <- eBayes(fitbiopsy)
+
+fit4biopsy <- topTable(fitbiopsy, genelist = featureDatabiopsy[, "Gene symbol"], n = Inf) |> 
+  rownames_to_column("row") |> 
+  filter(!is.na(ID)) |> 
+  filter(ID != "") |> 
+  group_by(ID) |> 
+  filter(P.Value == min(P.Value)) |> 
+  pull(row)
+
+gset4biopsy <- gset2[fit4biopsy]
+
+
+```
+
+# Data Wrangling
+
+```{r}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+#Exploring blood gene, prepare for training and testing set in data modeling)
+featureData4blood_clean <- fData(gset4blood)
+design4blood <- model.matrix(~Outcome, data = pData(gset4blood))
+fit4blood_clean <- lmFit(exprs(gset4blood), design4blood)
+fit4blood_clean <- eBayes(fit4blood_clean)
+
+
+#Exploring biopsy gene , prepare for training and testing set in data modeling
+featureData4biopsy_clean <- fData(gset4biopsy)
+design4biopsy_clean <- model.matrix(~Outcome, data = pData(gset4biopsy))
+fit4biopsy_clean <- lmFit(exprs(gset4biopsy), design4biopsy_clean)
+fit4biopsy_clean <- eBayes(fit4biopsy_clean)
+
+
+
+
+top4blood <- topTable(fit4blood_clean, genelist = featureData4blood_clean[, "Gene symbol"], n = 300)
+top4biopsy <- topTable(fit4biopsy_clean, genelist = featureData4biopsy_clean[, "Gene symbol"], n = 300) 
+
+
+
+
+
+```
+
+
+# Exploratory Data Analysis (EDA)
+***
+## GSE15296 (Peripheral Blood, Microarray)
+
+
+```{r}
+#check normalization (mean & median, pca, qq plot, t-test)
+
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+# load series and platform data from GEO
+
+# make proper column names to match toptable 
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+
+# group names for all samples
+gsms <- "undefined"
+sml <- c()
+for (i in 1:nchar(gsms)) { sml[i] <- substr(gsms,i,i) }
+
+# log2 transform
+ex <- exprs(gset)
+qx <- as.numeric(quantile(ex, c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm=T))
+LogC <- (qx[5] > 100) ||
+          (qx[6]-qx[1] > 50 && qx[2] > 0) ||
+          (qx[2] > 0 && qx[2] < 1 && qx[4] > 1 && qx[4] < 2)
+if (LogC) { ex[which(ex <= 0)] <- NaN
+  exprs(gset) <- log2(ex) }
+
+boxplot(exprs(gset), outline = FALSE)
+summary(melt(exprs(gset))$value)
+```
+
+
+
+```{r}
+
+boxplot(eMat[8000,] ~ gset$Outcome, ylab="log2 expression")
+t.test(eMat[8000,] ~ gset$Outcome)
+```
+
+
+t-test value is 5.5026, it is more than the critical t-value at 1.9961. Hence we will reject the null hypothesis and state that there is sufficient evidence to say that means of the two populations are significantly different.
+
+
+
+```{r}
+
+featureData <- fData(gset)
+cl <- factor(sample(c("YES", "NO"), 80, replace=TRUE))
+fakeX <- matrix(rnorm(10000*80), nrow=10000)
+design <- model.matrix(~ cl + 0 )
+fakefit <- lmFit(fakeX, design)
+cont.matrix <- makeContrasts(clYES - clNO, levels=design)
+fakefit2 <- contrasts.fit(fakefit, cont.matrix)
+fakefit2 <- eBayes(fakefit2)
+
+qqnorm(fakefit2$t)
+abline(0,1)
+
+```
+
+
+
+
+Multiple testing: For the "YES" and "NO" groups, we run multiple tests using the imFit() function to fit the samples into a linear model. For each feature, the eBayes() empirical Bayes method moderated the t-statistics and p-values. We can see that the majority of the sample fell along a straight line, with a few outliers dotting both tails. We can say that the blood dataset is normally distributed. 
+
+
+```{r}
+gse_pca <- prcomp(t(exprs(gset)))
+df_toplot <- data.frame(gset$Outcome, 
+                        pc1 = gse_pca$x[,1], pc2 = gse_pca$x[,2]  )
+g <- ggplot(df_toplot, aes(x = pc1, y = pc2, color = gset.Outcome)) + 
+  geom_point(size = 4) + 
+  theme_minimal() 
+g
+
+```
+
+
+The scatter plot shows that the rejection patients are easily distinguished because their outlines do not mix with the stable patients. While stable patients' outlines demonstrated the possibility of differentiation.
+
+## GSE34437 (Biopsy, Microarray)
+```{r}
+
+fvarLabels(gset2) <- make.names(fvarLabels(gset2))
+# load series and platform data from GEO
+
+# make proper column names to match toptable 
+fvarLabels(gset2) <- make.names(fvarLabels(gset2))
+
+# group names for all samples
+gsms2<- "undefined"
+sml2<- c()
+for (i in 1:nchar(gsms2)) { sml2[i] <- substr(gsms2,i,i) }
+
+# log2 transform
+ex2<- exprs(gset2)
+qx2<- as.numeric(quantile(ex2, c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm=T))
+LogC2<- (qx2[5] > 100) ||
+          (qx2[6]-qx2[1] > 50 && qx2[2] > 0) ||
+          (qx2[2] > 0 && qx2[2] < 1 && qx2[4] > 1 && qx2[4] < 2)
+if (LogC2) { ex2[which(ex2 <= 0)] <- NaN
+  exprs(gset2) <- log2(ex2) }
+
+boxplot(exprs(gset2), outline = FALSE)
+summary(melt(exprs(gset2))$value)
+
+```
+```{r}
+
+boxplot(eMat2[5000,] ~ gset2$Outcome, ylab="log2 expression")
+t.test(eMat2[5000,] ~ gset2$Outcome)
+
+
+```
+
+t-test value is 3.3725, it is more than the critical t-value at 2.1362. Hence we will reject the null hypothesis and state that there is sufficient evidence to say that means of the two populations are significantly different.
+
+```{r}
+
+featureData2 <- fData(gset2)
+cl2 <- factor(sample(c("YES", "NO"), 80, replace=TRUE))
+fakeX2  <- matrix(rnorm(10000*80), nrow=10000)
+design2  <- model.matrix(~ cl2  + 0 )
+fakefit4   <- lmFit(fakeX2 , design2)
+cont.matrix2  <- makeContrasts(cl2YES - cl2NO, levels=design2)
+fakefit3 <- contrasts.fit(fakefit4, cont.matrix2)
+fakefit3  <- eBayes(fakefit3)
+
+qqnorm(fakefit3$t)
+abline(0,1)
+
+```
+
+
+
+
+Multiple testing: For the "YES" and "NO" groups, we run multiple tests using the imFit() function to fit the samples into a linear model. For each feature, the eBayes() empirical Bayes method moderated the t-statistics and p-values. We can see that the majority of the sample fell along a straight line, with a few outliers dotting both tails. We can say that the biopsy dataset is normally distributed. 
+
+```{r}
+
+gse_pca2  <- prcomp(t(exprs(gset2)))
+df_toplot2 <- data.frame(gset2$Outcome, 
+                        pc1 = gse_pca2$x[,1], pc2 = gse_pca2$x[,2]  )
+g2 <- ggplot(df_toplot2, aes(x = pc1, y = pc2, color = gset2.Outcome)) + 
+  geom_point(size = 4) + 
+  theme_minimal() 
+g2
+
+
+```
+
+
+The scatter plot shows that the stable patients are easily distinguished because their outlines do not mix with the stable patients. While rejection patients' outlines demonstrated the possibility of differentiation.
+
+# Data Modeling - Applied Machine Learning
+
+
+Apply the machine learning models to predict patient rejection status from gene expression data.
+
+Large p small n 
+
+
+
+***
+## In-sample 
+
+```{r}
+gene4blood <- rownames(top4blood)[1:10]
+gene4biopsy <- rownames(top4biopsy)[1:10]
+
+X_gse4b = t(exprs(gset4blood)[ gene4blood, ])
+y_gse4b = ifelse(grepl("AR", gset4blood$title), "Rejection", "Stable")
+X_gse1b = t(exprs(gset4biopsy)[ gene4biopsy, ])
+y_gse1b = ifelse(grepl("AR", gset4biopsy$title), "Stable","Rejection")
+
+#In sample 
+
+#Framework 1 (SVM)
+
+set.seed(3888)
+
+cvK = 5    # Number of CV folds
+n_sim = 50 # Number of repeats
+
+# SVM CV for (blood)
+
+cv_accuracy_gse4b = numeric(n_sim)
+
+for (i in 1:n_sim) {
+  
+  cvSets = cvFolds(nrow(X_gse4b), cvK)
+  cv_accuracy_folds = numeric(cvK)
+  
+  for (j in 1:cvK) {
+    test_id = cvSets$subsets[cvSets$which == j]
+    X_train = X_gse4b[-test_id,]
+    X_test = X_gse4b[test_id,]
+    y_train = y_gse4b[-test_id]
+    y_test = y_gse4b[test_id]
+    
+    svm_fit4blood = svm(x = X_train, y = as.factor(y_train))
+    predictions = predict(svm_fit4blood, X_test)
+    cv_accuracy_folds[j] = mean(y_test == predictions)
+  }
+  cv_accuracy_gse4b[i] = mean(cv_accuracy_folds)
+}
+
+# SVM CV for (biopsy)
+
+cv_accuracy_gse1b = numeric(n_sim) # Vector to store averaged CV accuracies
+
+for (i in 1:n_sim) {
+  
+  cvSets = cvFolds(nrow(X_gse1b), cvK) # Folds object for cross-validation
+  cv_accuracy_folds = numeric(cvK) # Vector to store accuracy for each fold
+  
+  for (j in 1:cvK) {
+    test_id = cvSets$subsets[cvSets$which == j]
+    X_train = X_gse1b[-test_id,]
+    X_test = X_gse1b[test_id,]
+    y_train = y_gse1b[-test_id]
+    y_test = y_gse1b[test_id]
+    
+    svm_fit4biopsy = svm(x = X_train, y = as.factor(y_train))
+    predictions = predict(svm_fit4biopsy, X_test)
+    cv_accuracy_folds[j] = mean(y_test == predictions)
+  }
+  cv_accuracy_gse1b[i] = mean(cv_accuracy_folds)
+}
+
+
+```
+
+```{r}
+
+```
+
+
+
+##  Out-of-sample 
+
+```{r}
+
+X_gse4c = t(exprs(gset4blood))
+y_gse4c = ifelse(grepl("AR", gset4blood$title), "Rejection", "Stable")
+X_gse1c = t(exprs(gset4biopsy))
+y_gse1c = ifelse(grepl("AR", gset4biopsy$title), "Stable","Rejection")
+
+
+set.seed(3888)
+
+cvK = 5    # Number of CV folds
+n_sim = 50 # Number of repeats
+
+# SVM CV for (blood)
+
+cv_accuracy_gse4c = numeric(n_sim)
+
+for (i in 1:n_sim) {
+  
+  cvSets = cvFolds(nrow(X_gse4b), cvK)
+  cv_accuracy_folds = numeric(cvK)
+  
+  for (j in 1:cvK) {
+    test_id = cvSets$subsets[cvSets$which == j]
+    X_train = X_gse4c[-test_id,]
+    X_test = X_gse4c[test_id,]
+    y_train = y_gse4c[-test_id]
+    y_test = y_gse4c[test_id]
+    
+    design5 <- model.matrix(~y_train)
+    fit5  <- lmFit(t(X_train), design5)
+    fit5   <- eBayes(fit5)
+    top5  <- topTable(fit5, n = 10)
+    DE_genes <- rownames(top5)
+    
+    X_train = X_train[,DE_genes]
+    X_test = X_test[,DE_genes]
+    
+    svm_fit4bloodout = svm(x = X_train, y = as.factor(y_train), kernel = "linear")
+    predictions = predict(svm_fit4bloodout, X_test)
+    cv_accuracy_folds[j] = mean(y_test == predictions)
+  }
+  cv_accuracy_gse4c[i] = mean(cv_accuracy_folds)
+}
+
+# SVM CV for (biopsy)
+
+cv_accuracy_gse1c = numeric(n_sim) # Vector to store averaged CV accuracies
+
+for (i in 1:n_sim) {
+  
+  cvSets = cvFolds(nrow(X_gse1c), cvK) # Folds object for cross-validation
+  cv_accuracy_folds = numeric(cvK) # Vector to store accuracy for each fold
+  
+  for (j in 1:cvK) {
+    test_id = cvSets$subsets[cvSets$which == j]
+    X_train = X_gse1c[-test_id,]
+    X_test = X_gse1c[test_id,]
+    y_train = y_gse1c[-test_id]
+    y_test = y_gse1c[test_id]
+    
+    design5 <- model.matrix(~y_train)
+    fit5  <- lmFit(t(X_train), design5)
+    fit5   <- eBayes(fit5)
+    top5  <- topTable(fit5, n = 10)
+    DE_genes <- rownames(top5)
+    
+    X_train = X_train[,DE_genes]
+    X_test = X_test[,DE_genes]
+    
+    svm_fit4biopsyout = svm(x = X_train, y = as.factor(y_train), kernel = "linear")
+    predictions = predict(svm_fit4biopsyout, X_test)
+    cv_accuracy_folds[j] = mean(y_test == predictions)
+  }
+  cv_accuracy_gse1c[i] = mean(cv_accuracy_folds)
+}
+
+
+
+
+```
+
+
+
+
+# Data Interpretation
+***
+## ROC Curve 
+
+```{r}
+# Biopsy
+svm_fit_gse1b <- svm(x = X_gse1b, y = as.factor(y_gse1b))
+predictions_gse1b <- svm_fit_gse1b$decision.values
+roc_gse1b <- roc(as.factor(y_gse1b), predictions_gse1b)
+
+# Blood
+svm_fit_gse4b <- svm(x = X_gse4b, y = as.factor(y_gse4b))
+predictions_gse4b <- svm_fit_gse4b$decision.values
+roc_gse4b <- roc(as.factor(y_gse4b), predictions_gse4b)
+
+# Calculate distances from top left corner
+roc_data <- data.frame(
+  Method = c(rep("Blood", length(roc_gse4b$specificities)), rep("Biopsy", length(roc_gse1b$specificities))),
+  TPR = c(roc_gse4b$sensitivities, roc_gse1b$sensitivities),
+  FPR = c(1 - roc_gse4b$specificities, 1 - roc_gse1b$specificities)
+)
+
+roc_data$Distance <- sqrt((roc_data$TPR - 1)^2 + roc_data$FPR^2)
+
+
+# Recalculate ROC curve for biopsy method
+roc_gse1b <- roc(as.factor(y_gse1b), 1 - as.numeric(predictions_gse1b), direction = ">")
+auc_gse1b <- auc(roc_gse1b)
+
+
+roc_gse4b <- roc(as.factor(y_gse4b), as.numeric(predictions_gse4b), direction = ">")
+auc_gse1b <- auc(roc_gse1b)
+auc_gse4b <- auc(roc_gse4b)
+
+
+
+threshold_line <- data.frame(
+  x = c(1, rev(roc_gse1b$specificities), 0),
+  y = c(1, rev(roc_gse1b$sensitivities), 0)
+)
+
+# Plot the ROC curve 
+insamproc <- ggplot() +
+  geom_line(data = roc_data, aes(x = FPR, y = TPR, color = Method)) +
+  geom_point(data = roc_data, aes(x = FPR, y = TPR, color = Method)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_polygon(data = threshold_line, aes(x = x, y = y), fill = "lightblue", alpha = 0.5) +
+  xlim(0, 1) +
+  ylim(0, 1) +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "Receiver Operating Characteristic Curve (ROC)") +
+  annotate("text", x = 0.25, y = 0.9, label = paste("AUC for Biopsy:", round(auc_gse1b, 3)), color = "black", size = 4) +
+  annotate("text", x = 0.25, y = 0.85, label = paste("AUC for Blood:", round(auc_gse4b, 3)), color = "black", size = 4)
+
+insamproc
+
+
+closest_method <- roc_data$Method[which.min(roc_data$Distance)]
+print(paste("Method with the closest threshold point to the top left corner:", closest_method))
+
+
+# Print AUC values
+print(paste("AUC for Biopsy:", auc_gse1b))
+print(paste("AUC for Blood:", auc_gse4b))
+
+
+```
+
+
+
+Results from the ROC curve showed that compared to blood sample methods, biopsy sample methods have more threshold points that are closer to the top left corner. We also examine the area under the curve for blood and biopsy results. Blood has a slightly lower AUC value at 0.9950 than biopsy, which has an AUC of 0.9985. This demonstrated that the classification model for biopsy can distinguish between positive and negative samples more effectively than the classification model for blood. Due to acu values above 90 and close to 100%, both models' performances are regarded as perfect classifiers in terms of effectiveness. In this case, biopsy sample methods are preferable due to their exceptional accuracy. 
+However, We cannot yet draw the conclusion that the biopsy sample is better because the ROC curve performance accuracy of the biopsy and Blood sample are comparable and nearly equal. To test the predictions of both, more matrices are needed.
+
+
+
+
+## In-sample vs Out-of-sample mean accuracy
+
+```{r}
+
+plot_df = data.frame(accuracy = c(
+                                  cv_accuracy_gse1c,
+                                  cv_accuracy_gse4c),
+                     model = c(
+                               rep("Biopsy", length(cv_accuracy_gse1c)),
+                               rep("Blood", length(cv_accuracy_gse4c))))
+
+
+outsamp <- ggplot(data = plot_df, aes(x = model, y = accuracy)) +
+  geom_boxplot() +
+  geom_jitter(alpha = 0.3) +
+  labs(title = "Out of Sample",
+       x = "Sample Types",
+       y = "Mean Accuracy (%)") +
+  theme(plot.title = element_text(hjust = 0.5, size = 12),
+        panel.border = element_rect(colour = "black", fill = NA, size = 1))
+
+
+plot_df = data.frame(accuracy = c(cv_accuracy_gse1b,
+                                  cv_accuracy_gse4b),
+                     model = c(rep("Biopsy", length(cv_accuracy_gse1b)),
+                               rep("Blood", length(cv_accuracy_gse4b))))
+
+insamp <- ggplot(data = plot_df, aes(x = model, y = accuracy)) +
+  geom_boxplot() +
+  labs(x = "Sample Types", y = "Mean Accuracy (%) ", title = "In sample") +
+  theme(plot.title = element_text(hjust = 0.5, size = 12),
+        panel.border = element_rect(colour = "black", fill = NA, size = 1))
+
+  
+insamp + outsamp
+
+  
+
+```
+
+
+Comments:
+The biopsy model outperforms the blood model both inside and outside of the sample.
+The in-sample is deemed invalid due to a nearly perfect mean accuracy score of close to 100% for both models. The mean accuracy for both models in out of sample is in the 0.87-0.95 range, which is considered lower but still quite high. There was not a significant drop in mean accuracy percentage in Biopsy sample, indicating that the dataset was not underfitting or overfitting and that the outcome was not overly complex. Hence. We conclude that the biopsy model is more accurate overall.
+
+
+
+
+
+## SVM Decision Boundary 
+
+
+### Blood 
+
+
+
+
+```{r}
+
+
+# Perform PCA on the data (blood)
+pca_result <- prcomp(t(X_gse4c), center = TRUE, scale. = TRUE)
+X_pca <- predict(pca_result, newdata = t(X_gse4c))
+
+# Trim the dimensions of y_gse4c to match X_pca
+y_trimmed <- y_gse4c[1:nrow(X_pca)]
+
+
+pca_df <- data.frame(PC1 = X_pca[, 1], PC2 = X_pca[, 2], y_gse4c = as.factor(y_trimmed))
+
+# Train SVM on the PCA-transformed data (blood)
+svm_fit4bloodout <- svm(y_gse4c ~ ., data = pca_df, kernel = "linear")
+
+# Create a meshgrid of points to visualize the decision boundary
+x1 <- seq(min(pca_df$PC1), max(pca_df$PC1), length = 100)
+x2 <- seq(min(pca_df$PC2), max(pca_df$PC2), length = 100)
+grid <- expand.grid(PC1 = x1, PC2 = x2)
+
+# Check dimensions of X_gse4c and grid
+cat("Dimensions of X_gse4c:", dim(X_gse4c), "\n")
+cat("Dimensions of grid:", dim(grid), "\n")
+
+```
+
+Comment:  X_gse4c (Blood sample) and grid has unequal sample and feature distributions, PCA is required to reduce datapoint dimensions in order to create the svm decision boundary.
+
+```{r}
+# Make predictions on the meshgrid points
+grid$predictions <- predict(svm_fit4bloodout, newdata = grid)
+
+# Plot decision boundary (blood)
+#bloodout <- plot(PC2 ~ PC1, data = pca_df, main = "SVM Decision Boundary (Blood)")
+#points(PC2 ~ PC1, data = pca_df, col = as.numeric(pca_df$y_gse4c))
+#points(PC2 ~ PC1, data = grid, col = grid$predictions, pch = ".", cex = 0.8)
+
+
+#Clean_version (blood) 
+
+# Define color palette for the plot
+colors <- brewer.pal(length(levels(pca_df$y_gse4c)), "Set1")
+
+# Plot decision boundary (blood)
+bloodout1 <- plot(PC2 ~ PC1, data = pca_df, main = "SVM Decision Boundary with a maximum margin (Blood)", xlim = c(0, 20), ylim = c(-20, 20), xlab = "PC1", ylab = "PC2")
+points(PC2 ~ PC1, data = pca_df, col = colors[as.numeric(pca_df$y_gse4c)], pch = 20, cex = 1.5, alpha = 0.7)
+points(PC2 ~ PC1, data = grid, col = colors[as.numeric(grid$predictions)], pch = ".", cex = 0.8)
+legend("topright", legend = levels(pca_df$y_gse4c), fill = colors, border = NA)
+
+
+# Read the results of the plot
+
+# Determine the predicted class labels for the data points
+predicted_labels <- grid$predictions
+
+# Create a subset of the original data frame to match the number of meshgrid points
+subset_df <- pca_df[1:nrow(grid), ]
+
+# Create a data frame with the PCA coordinates, true class labels, and predicted class labels
+result_df <- data.frame(PC1 = subset_df$PC1, PC2 = subset_df$PC2, True_Labels = subset_df$y_gse4c, Predicted_Labels = as.factor(predicted_labels))
+
+
+# Remove any missing values
+result_df <- na.omit(result_df)
+
+# Assess the accuracy of the SVM decision boundary model 
+accuracy <- sum(result_df$True_Labels == result_df$Predicted_Labels) / nrow(result_df)
+cat("Accuracy:", accuracy, "\n")
+```
+
+
+According to the blood sample accuracy result, the model achieved a low accuracy of 0.32 for correctly classifying rejection and a stable outcome from gene expression data points. In other words, only 32% of the outcomes in this dataset were correctly identified.
+
+
+
+### Biopsy
+
+
+```{r}
+
+
+# Perform PCA on the data (biopsy)
+pca_result1  <- prcomp(t(X_gse1c), center = TRUE, scale. = TRUE)
+X_pca1 <- predict(pca_result1 , newdata1 = t(X_gse1c))
+
+# Trim the dimensions of y_gse1c to match X_pca1
+y_trimmed1 <- y_gse1c[1:nrow(X_pca1)]
+
+# Create a data frame with PCA-transformed data and response variable (blood)
+pca_df1 <- data.frame(PC1b = X_pca1[, 1], PC2b = X_pca1[, 2], y_gse1c = as.factor(y_trimmed1))
+
+# Train SVM on the PCA-transformed data (biopsy)
+svm_fit4biopsyout <- svm(y_gse1c ~ ., data = pca_df1, kernel = "linear")
+
+# Create a meshgrid of points to visualize the decision boundary
+x1b <- seq(min(pca_df1$PC1b), max(pca_df1$PC1b), length = 100)
+x2b <- seq(min(pca_df1$PC2b), max(pca_df1$PC2b), length = 100)
+grid1 <- expand.grid(PC1b = x1b, PC2b = x2b)
+
+
+# Check dimensions of X_gse4c and grid
+cat("Dimensions of X_gse1c:", dim(X_gse1c), "\n")
+cat("Dimensions of grid:", dim(grid1), "\n")
+```
+
+Comment:  X_gse1c (Biopsy sample) and grid has unequal sample and feature distributions, PCA is required to reduce datapoint dimensions in order to create the svm decision boundary.
+
+
+
+```{r}
+
+# Perform prediction on the meshgrid points
+predictions1 <- predict(svm_fit4biopsyout, newdata = grid1)
+
+# Add the predictions to the grid1 data frame
+grid1$predictions1 <- predictions1
+
+
+# Plot decision boundary (biopsy)
+#biopsyout <- plot(PC2b ~ PC1b, data = pca_df1, main = "SVM Decision Boundary (Biopsy)")
+#points(PC2b ~ PC1b, data = pca_df1, col = as.numeric(pca_df1$y_gse1c))
+#points(PC2b ~ PC1b, data = grid1, col = grid1$predictions1, pch = ".", cex = 0.8)
+
+
+#Clean_version (biopsy) 
+
+# Define color palette for the plot
+colors <- brewer.pal(length(levels(pca_df1$y_gse1c)), "Set1")
+
+# Plot decision boundary (biopsy)
+biopsyout1 <- plot(PC2b ~ PC1b, data = pca_df1, main = "SVM Decision Boundary with a maximum margin (Biopsy)", xlim = c(0, 20), ylim = c(-20, 20), xlab = "PC1b", ylab = "PC2b")
+points(PC2b ~ PC1b, data = pca_df1, col = colors[as.numeric(pca_df1$y_gse1c)], pch = 20, cex = 1.5, alpha = 0.7)
+points(PC2b ~ PC1b, data = grid1, col = colors[as.numeric(grid1$predictions1)], pch = ".", cex = 0.8)
+legend("topright", legend = levels(pca_df1$y_gse1c), fill = colors, border = NA)
+
+
+
+
+# Determine the predicted class labels for the data points
+predicted_labels1 <- grid1$predictions1
+
+# Create a subset of the original data frame to match the number of meshgrid1 points
+subset_df1 <- pca_df1[1:nrow(grid1), ]
+
+
+# Perform prediction on the meshgrid points
+predictions1 <- predict(svm_fit4biopsyout, newdata = grid1)
+
+if (length(predictions1) == 0) {
+  stop("No predictions generated. Check if the SVM model was trained successfully.")
+}
+
+# Add the predictions to the grid1 data frame
+if (nrow(grid1) == length(predictions1)) {
+  grid1$predictions1 <- predictions1
+} else {
+  stop("Mismatch in the number of rows between grid1 and predictions1.")
+}
+
+
+
+# Create a data frame with the PCA coordinates, true class labels, and predicted class labels
+result_df1 <- data.frame(PC1b = subset_df1$PC1b, PC2b = subset_df1$PC2b, True_Labels1 = subset_df1$y_gse1c, predicted_labels1 = as.factor(predictions1))
+
+# Remove missing values
+result_df1 <- na.omit(result_df1)
+
+#  accuracy 
+accuracy1 <- sum(result_df1$True_Labels1 == result_df1$predicted_labels1) / nrow(result_df1)
+cat("Accuracy:", accuracy1, "\n")
+
+
+
+```
+
+
+In this case, the biopsy decision boundary model showed 0.80 percent of the svm model correctly classifying correct rejection and stable outcome in the biopsy dataset. To put it simply, approximately 80% of gene expression data points have been correctly classified. 
+
+We conclude that the biopsy svm decision boundary has a higher accuracy value than blood, implying that the biopsy model performs better overall. 
+
+
+
+ Based on cross-validation and classification algorithms developed from three SVM models, including ROC Curve, in-sample and out-of-sample mean accuracy, and decision boundary results, the biopsy is a better predictor of kidney transplant success in the early stage than blood. The successful results also indicated that the all-robustness models should be integrated with the visualisation method in the R Shiny App.
+
+
+
+
+
+
+
+
+
+
+
+
